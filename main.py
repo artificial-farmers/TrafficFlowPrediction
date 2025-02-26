@@ -1,91 +1,58 @@
 """
-Traffic Flow Prediction with Neural Networks(SAEs、LSTM、GRU).
+Traffic Flow Prediction with Neural Networks (LSTM, GRU, SAE).
+Main evaluation script to compare model performance.
 """
+import argparse
+import os
 import math
 import warnings
 import numpy as np
 import pandas as pd
-from data.data import process_data
-from keras.models import load_model
-from keras.utils.vis_utils import plot_model
-import sklearn.metrics as metrics
 import matplotlib as mpl
 import matplotlib.pyplot as plt
+import tensorflow as tf
+from typing import List, Tuple
+
+from data.preprocessing import process_data
+from src.utils.evaluation import evaluate_regression, mean_absolute_percentage_error
+
 warnings.filterwarnings("ignore")
 
 
-def MAPE(y_true, y_pred):
-    """Mean Absolute Percentage Error
-    Calculate the mape.
+def plot_results(y_true: np.ndarray, y_preds: List[np.ndarray], names: List[str],
+                 start_date: str = '2016-3-4 00:00', freq: str = '5min',
+                 num_points: int = 288) -> None:
+    """Plot the true data and predicted data.
 
-    # Arguments
-        y_true: List/ndarray, ture data.
-        y_pred: List/ndarray, predicted data.
-    # Returns
-        mape: Double, result data for train.
+    Args:
+        y_true: True values
+        y_preds: List of predictions from different models
+        names: Model names
+        start_date: Starting date for x-axis labels
+        freq: Frequency of data points
+        num_points: Number of points to plot
     """
+    # Create time index
+    x = pd.date_range(start_date, periods=num_points, freq=freq)
 
-    y = [x for x in y_true if x > 0]
-    y_pred = [y_pred[i] for i in range(len(y_true)) if y_true[i] > 0]
-
-    num = len(y_pred)
-    sums = 0
-
-    for i in range(num):
-        tmp = abs(y[i] - y_pred[i]) / y[i]
-        sums += tmp
-
-    mape = sums * (100 / num)
-
-    return mape
-
-
-def eva_regress(y_true, y_pred):
-    """Evaluation
-    evaluate the predicted resul.
-
-    # Arguments
-        y_true: List/ndarray, ture data.
-        y_pred: List/ndarray, predicted data.
-    """
-
-    mape = MAPE(y_true, y_pred)
-    vs = metrics.explained_variance_score(y_true, y_pred)
-    mae = metrics.mean_absolute_error(y_true, y_pred)
-    mse = metrics.mean_squared_error(y_true, y_pred)
-    r2 = metrics.r2_score(y_true, y_pred)
-    print('explained_variance_score:%f' % vs)
-    print('mape:%f%%' % mape)
-    print('mae:%f' % mae)
-    print('mse:%f' % mse)
-    print('rmse:%f' % math.sqrt(mse))
-    print('r2:%f' % r2)
-
-
-def plot_results(y_true, y_preds, names):
-    """Plot
-    Plot the true data and predicted data.
-
-    # Arguments
-        y_true: List/ndarray, ture data.
-        y_pred: List/ndarray, predicted data.
-        names: List, Method names.
-    """
-    d = '2016-3-4 00:00'
-    x = pd.date_range(d, periods=288, freq='5min')
-
-    fig = plt.figure()
+    # Create figure
+    fig = plt.figure(figsize=(12, 8))
     ax = fig.add_subplot(111)
 
-    ax.plot(x, y_true, label='True Data')
+    # Plot ground truth
+    ax.plot(x, y_true[:num_points], label="True Data", linewidth=2)
+
+    # Plot predictions
     for name, y_pred in zip(names, y_preds):
-        ax.plot(x, y_pred, label=name)
+        ax.plot(x, y_pred[:num_points], label=name, linestyle="--", alpha=0.8)
 
-    plt.legend()
-    plt.grid(True)
-    plt.xlabel('Time of Day')
-    plt.ylabel('Flow')
+    # Add legend and grid
+    plt.legend(loc="best")
+    plt.grid(True, alpha=0.3)
+    plt.xlabel("Time of Day")
+    plt.ylabel("Flow")
 
+    # Format x-axis with hours and minutes
     date_format = mpl.dates.DateFormatter("%H:%M")
     ax.xaxis.set_major_formatter(date_format)
     fig.autofmt_xdate()
@@ -93,35 +60,114 @@ def plot_results(y_true, y_preds, names):
     plt.show()
 
 
+def parse_arguments():
+    """Parse command line arguments."""
+    parser = argparse.ArgumentParser(
+        description="Evaluate traffic flow prediction models"
+    )
+
+    parser.add_argument(
+        "--train_file",
+        type=str,
+        default="data/raw/train.csv",
+        help="Path to training data CSV file",
+    )
+
+    parser.add_argument(
+        "--test_file",
+        type=str,
+        default="data/raw/test.csv",
+        help="Path to test data CSV file",
+    )
+
+    parser.add_argument(
+        "--lag",
+        type=int,
+        default=12,
+        help="Number of lagged observations to use as features",
+    )
+
+    parser.add_argument(
+        "--models_dir",
+        type=str,
+        default="saved_models",
+        help="Directory containing trained models",
+    )
+
+    return parser.parse_args()
+
+
 def main():
-    lstm = load_model('model/lstm.h5')
-    gru = load_model('model/gru.h5')
-    saes = load_model('model/saes.h5')
-    models = [lstm, gru, saes]
-    names = ['LSTM', 'GRU', 'SAEs']
+    """Main function to evaluate models."""
+    # Parse arguments
+    args = parse_arguments()
 
-    lag = 12
-    file1 = 'data/train.csv'
-    file2 = 'data/test.csv'
-    _, _, X_test, y_test, scaler = process_data(file1, file2, lag)
-    y_test = scaler.inverse_transform(y_test.reshape(-1, 1)).reshape(1, -1)[0]
+    # Process data
+    _, _, X_test, y_test, scaler = process_data(
+        args.train_file, args.test_file, args.lag
+    )
 
-    y_preds = []
-    for name, model in zip(names, models):
-        if name == 'SAEs':
-            X_test = np.reshape(X_test, (X_test.shape[0], X_test.shape[1]))
+    # Original scale y_test
+    y_test_original = scaler.inverse_transform(
+        y_test.reshape(-1, 1)
+    ).reshape(1, -1)[0]
+
+    # Load models
+    model_names = ["lstm", "gru", "saes"]
+    models = []
+
+    for name in model_names:
+        model_path = os.path.join(args.models_dir, f"{name}.h5")
+        if os.path.exists(model_path):
+            models.append(tf.keras.models.load_model(model_path))
         else:
-            X_test = np.reshape(X_test, (X_test.shape[0], X_test.shape[1], 1))
-        file = 'images/' + name + '.png'
-        plot_model(model, to_file=file, show_shapes=True)
-        predicted = model.predict(X_test)
-        predicted = scaler.inverse_transform(predicted.reshape(-1, 1)).reshape(1, -1)[0]
-        y_preds.append(predicted[:288])
-        print(name)
-        eva_regress(y_test, predicted)
+            print(f"Model {name} not found at {model_path}")
+            model_names.remove(name)
 
-    plot_results(y_test[: 288], y_preds, names)
+    # Make predictions
+    predictions = []
+
+    for i, (name, model) in enumerate(zip(model_names, models)):
+        print(f"Evaluating {name.upper()} model...")
+
+        # Reshape input for recurrent models
+        if name in ["lstm", "gru"]:
+            X_test_reshaped = np.reshape(
+                X_test, (X_test.shape[0], X_test.shape[1], 1)
+            )
+        else:
+            X_test_reshaped = X_test
+
+        # Generate predictions
+        y_pred = model.predict(X_test_reshaped)
+
+        # Inverse transform predictions to original scale
+        y_pred_original = scaler.inverse_transform(
+            y_pred.reshape(-1, 1)
+        ).reshape(1, -1)[0]
+
+        predictions.append(y_pred_original)
+
+        # Create model visualization image
+        os.makedirs("images", exist_ok=True)
+        model_plot_path = f"images/{name}.png"
+        tf.keras.utils.plot_model(model, to_file=model_plot_path, show_shapes=True)
+
+        # Evaluate model
+        results = evaluate_regression(y_test_original, y_pred_original)
+
+        # Print results
+        print(f"\nEvaluation results for {name.upper()}:")
+        print(f"Explained Variance Score: {results['explained_variance']:.4f}")
+        print(f"MAPE: {results['mape']:.2f}%")
+        print(f"MAE: {results['mae']:.4f}")
+        print(f"MSE: {results['mse']:.4f}")
+        print(f"RMSE: {results['rmse']:.4f}")
+        print(f"R²: {results['r2']:.4f}")
+
+    # Plot comparison of predictions
+    plot_results(y_test_original, predictions, [name.upper() for name in model_names])
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     main()
