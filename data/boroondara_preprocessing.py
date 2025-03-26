@@ -32,7 +32,9 @@ def load_scats_data(file_path: str) -> pd.DataFrame:
         if pd.isna(row['SCATS Number']) or pd.isna(row['Date']):
             continue
 
-        site = row['SCATS Number']
+        # Convert SCATS number to string
+        site = str(row['SCATS Number'])
+        location = row['Location']
         try:
             date = pd.to_datetime(row['Date'], format='%m/%d/%Y')
         except:
@@ -56,6 +58,7 @@ def load_scats_data(file_path: str) -> pd.DataFrame:
             # Add to cleaned data
             cleaned_data.append({
                 'SCATS_Site': site,
+                'Location': location,
                 'Timestamp': timestamp,
                 'Traffic_Flow': flow
             })
@@ -85,6 +88,9 @@ def prepare_site_data(df: pd.DataFrame, site_id: str, seq_length: int = 12) -> T
         y_test: Testing targets
         scaler: Fitted MinMaxScaler
     """
+    # Ensure site_id is a string
+    site_id = str(site_id)
+
     # Filter data for the specified site
     site_data = df[df['SCATS_Site'] == site_id].sort_values('Timestamp')
 
@@ -165,6 +171,8 @@ def prepare_multi_site_data(df: pd.DataFrame, site_ids: List[str], seq_length: i
     error_count = 0
 
     for site_id in site_ids:
+        # Ensure site_id is a string
+        site_id = str(site_id)
         try:
             result[site_id] = prepare_site_data(df, site_id, seq_length)
             success_count += 1
@@ -254,7 +262,21 @@ def get_boroondara_sites(metadata_df: pd.DataFrame) -> List[str]:
     return boroondara_sites
 
 
-def prepare_boroondara_dataset(scats_data_path: str, metadata_path: str, output_dir: str, seq_length: int = 12) -> None:
+def get_available_scats_sites(df: pd.DataFrame) -> List[str]:
+    """
+    Get a list of unique SCATS site IDs available in the dataset.
+
+    Args:
+        df: DataFrame with traffic flow data
+
+    Returns:
+        List of unique SCATS site IDs
+    """
+    # Ensure all site IDs are strings
+    return sorted([str(site) for site in df['SCATS_Site'].unique()])
+
+
+def prepare_boroondara_dataset(scats_data_path: str, metadata_path: str, output_dir: str, seq_length: int = 12, per_site: bool = True) -> None:
     """
     Prepare training and testing datasets for Boroondara SCATS sites.
 
@@ -263,6 +285,7 @@ def prepare_boroondara_dataset(scats_data_path: str, metadata_path: str, output_
         metadata_path: Path to SCATS metadata CSV file
         output_dir: Directory to save processed data
         seq_length: Number of time steps to use for sequence prediction
+        per_site: Whether to save individual site data separately
     """
     # Create output directory if it doesn't exist
     os.makedirs(output_dir, exist_ok=True)
@@ -273,72 +296,149 @@ def prepare_boroondara_dataset(scats_data_path: str, metadata_path: str, output_
         scats_df = load_scats_data(scats_data_path)
         print(f"Loaded {len(scats_df)} records from SCATS data file")
 
-        print("Loading SCATS metadata...")
-        metadata_df = load_scats_metadata(metadata_path)
-        print(f"Loaded {len(metadata_df)} sites from metadata file")
+        # Get available sites
+        available_sites = get_available_scats_sites(scats_df)
+        print(f"Found {len(available_sites)} unique SCATS sites in the dataset")
 
-        # Get Boroondara sites
-        boroondara_sites = get_boroondara_sites(metadata_df)
-        print(f"Found {len(boroondara_sites)} potential Boroondara sites")
+        # Create a sites info file
+        sites_info = []
+        for site_id in available_sites:
+            # Ensure site_id is a string
+            site_id = str(site_id)
+            site_data = scats_df[scats_df['SCATS_Site'] == site_id]
+            location = site_data['Location'].iloc[0] if not site_data.empty else "Unknown"
+            days = site_data['Timestamp'].dt.date.nunique()
+            intervals = len(site_data)
+            sites_info.append({
+                'SCATS_Site': site_id,
+                'Location': location,
+                'Days': days,
+                'Data_Points': intervals
+            })
 
-        # Filter for available sites
-        available_sites = scats_df['SCATS_Site'].unique()
-        print(
-            f"Found {len(available_sites)} sites with data in the SCATS dataset")
+        sites_info_df = pd.DataFrame(sites_info)
+        sites_info_df.to_csv(os.path.join(output_dir, 'sites_info.csv'), index=False)
+        print(f"Sites information saved to {os.path.join(output_dir, 'sites_info.csv')}")
 
-        valid_sites = [
-            site for site in boroondara_sites if site in available_sites]
+        if metadata_path and os.path.exists(metadata_path):
+            print("Loading SCATS metadata...")
+            metadata_df = load_scats_metadata(metadata_path)
+            print(f"Loaded {len(metadata_df)} sites from metadata file")
 
-        if not valid_sites:
-            print("Warning: No exact matches between Boroondara sites and available data")
+            # Get Boroondara sites
+            boroondara_sites = get_boroondara_sites(metadata_df)
+            print(f"Found {len(boroondara_sites)} potential Boroondara sites")
+
+            # Filter for sites that are both in Boroondara and have data
+            valid_sites = [site for site in boroondara_sites if site in available_sites]
+            print(f"Found {len(valid_sites)} Boroondara sites with data")
+
+            if not valid_sites:
+                print("Warning: No exact matches between Boroondara sites and available data")
+                print("Using all available sites from the SCATS data")
+                valid_sites = available_sites
+        else:
+            print("No metadata file provided or file not found")
             print("Using all available sites from the SCATS data")
             valid_sites = available_sites
 
-        print(f"Processing {len(valid_sites)} valid sites")
-
         # Take a subset if too many sites (to speed up development)
-        if len(valid_sites) > 10:
-            print(f"Limiting to 10 sites for faster processing")
-            valid_sites = valid_sites[:10]
+        # Comment this out for production use
+        # if len(valid_sites) > 10:
+        #     print(f"Limiting to 10 sites for faster processing")
+        #     valid_sites = valid_sites[:10]
 
-        # Prepare data for each site
-        site_data = prepare_multi_site_data(scats_df, valid_sites, seq_length)
+        # Prepare combined dataset
+        if not per_site:
+            print("Preparing combined dataset for all sites...")
+            all_X_train, all_y_train = [], []
+            all_X_test, all_y_test = [], []
 
-        # Create a consolidated dataset
-        all_X_train, all_y_train = [], []
-        all_X_test, all_y_test = [], []
+            # Prepare data for each site
+            site_data = prepare_multi_site_data(scats_df, valid_sites, seq_length)
 
-        for site, (X_train, y_train, X_test, y_test, _) in site_data.items():
-            all_X_train.append(X_train)
-            all_y_train.append(y_train)
-            all_X_test.append(X_test)
-            all_y_test.append(y_test)
+            for site, (X_train, y_train, X_test, y_test, _) in site_data.items():
+                all_X_train.append(X_train)
+                all_y_train.append(y_train)
+                all_X_test.append(X_test)
+                all_y_test.append(y_test)
 
-        # Combine data from all sites
-        if all_X_train:
-            X_train_combined = np.vstack(all_X_train)
-            y_train_combined = np.concatenate(all_y_train)
-            X_test_combined = np.vstack(all_X_test)
-            y_test_combined = np.concatenate(all_y_test)
+            # Combine data from all sites
+            if all_X_train:
+                X_train_combined = np.vstack(all_X_train)
+                y_train_combined = np.concatenate(all_y_train)
+                X_test_combined = np.vstack(all_X_test)
+                y_test_combined = np.concatenate(all_y_test)
 
-            # Shuffle the training data
-            shuffle_idx = np.random.permutation(len(X_train_combined))
-            X_train_combined = X_train_combined[shuffle_idx]
-            y_train_combined = y_train_combined[shuffle_idx]
+                # Shuffle the training data
+                shuffle_idx = np.random.permutation(len(X_train_combined))
+                X_train_combined = X_train_combined[shuffle_idx]
+                y_train_combined = y_train_combined[shuffle_idx]
 
-            # Save the datasets
-            np.save(os.path.join(output_dir, 'X_train.npy'), X_train_combined)
-            np.save(os.path.join(output_dir, 'y_train.npy'), y_train_combined)
-            np.save(os.path.join(output_dir, 'X_test.npy'), X_test_combined)
-            np.save(os.path.join(output_dir, 'y_test.npy'), y_test_combined)
+                # Save the combined datasets
+                np.save(os.path.join(output_dir, 'X_train.npy'), X_train_combined)
+                np.save(os.path.join(output_dir, 'y_train.npy'), y_train_combined)
+                np.save(os.path.join(output_dir, 'X_test.npy'), X_test_combined)
+                np.save(os.path.join(output_dir, 'y_test.npy'), y_test_combined)
 
-            print(f"Datasets saved to {output_dir}")
-            print(f"X_train shape: {X_train_combined.shape}")
-            print(f"y_train shape: {y_train_combined.shape}")
-            print(f"X_test shape: {X_test_combined.shape}")
-            print(f"y_test shape: {y_test_combined.shape}")
-        else:
-            print("No data to save - check your data files and site IDs")
+                print(f"Combined dataset saved to {output_dir}")
+                print(f"X_train shape: {X_train_combined.shape}")
+                print(f"y_train shape: {y_train_combined.shape}")
+                print(f"X_test shape: {X_test_combined.shape}")
+                print(f"y_test shape: {y_test_combined.shape}")
+            else:
+                print("No data to save - check your data files and site IDs")
+
+        # Prepare individual datasets for each site
+        if per_site:
+            # Create a directory for per-site data
+            per_site_dir = os.path.join(output_dir, 'per_site')
+            os.makedirs(per_site_dir, exist_ok=True)
+
+            print(f"Preparing individual datasets for {len(valid_sites)} sites...")
+            site_info_list = []
+
+            for site_id in valid_sites:
+                try:
+                    # Ensure site_id is a string
+                    site_id = str(site_id)
+                    site_dir = os.path.join(per_site_dir, site_id)
+                    os.makedirs(site_dir, exist_ok=True)
+
+                    X_train, y_train, X_test, y_test, scaler = prepare_site_data(scats_df, site_id, seq_length)
+
+                    # Save datasets for this site
+                    np.save(os.path.join(site_dir, 'X_train.npy'), X_train)
+                    np.save(os.path.join(site_dir, 'y_train.npy'), y_train)
+                    np.save(os.path.join(site_dir, 'X_test.npy'), X_test)
+                    np.save(os.path.join(site_dir, 'y_test.npy'), y_test)
+
+                    # Save scaler
+                    import joblib
+                    joblib.dump(scaler, os.path.join(site_dir, 'scaler.joblib'))
+
+                    # Get the location name
+                    site_data = scats_df[scats_df['SCATS_Site'] == site_id]
+                    location = site_data['Location'].iloc[0] if not site_data.empty else "Unknown"
+
+                    # Add to info list
+                    site_info_list.append({
+                        'site_id': site_id,
+                        'location': location,
+                        'train_samples': len(X_train),
+                        'test_samples': len(X_test)
+                    })
+
+                    print(f"Saved data for site {site_id} - {location}")
+                except Exception as e:
+                    print(f"Error processing site {site_id}: {str(e)}")
+
+            # Save site info
+            site_info_df = pd.DataFrame(site_info_list)
+            site_info_df.to_csv(os.path.join(per_site_dir, 'site_info.csv'), index=False)
+            print(f"Per-site datasets saved to {per_site_dir}")
+            print(f"Processed {len(site_info_list)} sites successfully")
+
     except Exception as e:
         print(f"Error in data preparation: {str(e)}")
         import traceback
@@ -351,4 +451,4 @@ if __name__ == "__main__":
     metadata_path = "data/raw/SCATSSiteListingSpreadsheet_VicRoads.csv"
     output_dir = "data/processed/boroondara"
 
-    prepare_boroondara_dataset(scats_data_path, metadata_path, output_dir)
+    prepare_boroondara_dataset(scats_data_path, metadata_path, output_dir, per_site=True)
